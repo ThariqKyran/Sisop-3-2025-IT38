@@ -152,6 +152,17 @@ void hunter_menu() {
 void register_hunter() {
     char name[USERNAME_LEN];
     printf("Username: "); scanf("%s", name);
+
+    // Cek apakah username sudah ada di hunter yang aktif (used = true)
+    for (int i = 0; i < MAX_HUNTERS; i++) {
+        if (data->hunters[i].used && strcmp(data->hunters[i].username, name) == 0) {
+            printf("Hunter already registered\n");
+            printf("Registration failed.\n");
+            return; // Langsung keluar jika username sudah ada
+        }
+    }
+
+    // Jika username belum ada, cari slot kosong
     for (int i = 0; i < MAX_HUNTERS; i++) {
         if (!data->hunters[i].used) {
             strcpy(data->hunters[i].username, name);
@@ -167,9 +178,10 @@ void register_hunter() {
             return;
         }
     }
+
+    // Jika tidak ada slot kosong
     printf("Registration failed.\n");
 }
-
 void login_hunter() {
     char name[USERNAME_LEN];
     printf("Username: "); scanf("%s", name);
