@@ -21,7 +21,394 @@ Semoga Allah memudahkan langkah kita semua dalam menuntut ilmu, mengamalkannya, 
 |Muhammad Hikari Reiziq R.  | 5027241079 |
 |Dira Muhammad Ilyas S. A.  | 5027241033 |
 |Thariq Kyran Aryunaldi     | 5027241073 |
+### Soal 1
+Kita disuruh membuat sistem RPC server-client untuk mengubah text file sehingga bisa dilihat dalam bentuk file jpeg.
+```bash
+wget "https://drive.usercontent.google.com/u/0/uc?id=15mnXpYUimVP1F5Df7qd_Ahbjor3o1cVw&export=download" -O secrets.zip && unzip secrets.zip && rm secrets.zip && mkdir -p client && mv secrets client/ && mkdir -p server/database && touch server/server.log 
 
+```
+
+---
+
+## Bagian: **Header dan Definisi Makro**
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+#include <time.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+
+```
+
+Mengimpor semua header penting:
+
+- `socket`, `bind`, `accept` → untuk server TCP (Transmission Control Protocol)
+- `time.h`, `unistd.h` → untuk waktu & proses
+- `sys/stat.h` → untuk `umask`, file permission
+- `pthread.h` di sini **tidak digunakan**, jadi bisa dihapus
+
+```c
+#define PORT 8080
+#define LOG_PATH "/home/reiziqzip/modul3/soal_1/server/server.log"
+#define DB_PATH "/home/reiziqzip/modul3/soal_1/server/database/"
+#define MAX_BUF 65536
+
+```
+
+Makro untuk:
+
+- Port TCP yang digunakan (8080)
+- Path untuk file log dan folder database
+- Buffer maksimum 64KB
+
+---
+
+## Fungsi: `log_message(...)`
+
+```c
+void log_message(const char *source, const char *action, const char *info)
+
+```
+
+Menulis log ke `server.log` dalam format:
+
+```
+[Source][YYYY-MM-DD HH:MM:SS]: [ACTION] [Info]
+
+```
+
+---
+
+## Fungsi: `hex_to_bytes(...)`
+
+```c
+void hex_to_bytes(const char *hex, unsigned char *bytes, size_t *out_len)
+
+```
+
+Mengubah string hex menjadi array byte (binary JPEG):
+
+- Misal `"4a4b"` → byte[0] = 0x4a, byte[1] = 0x4b
+
+---
+
+## Fungsi: `reverse_string(...)`
+
+```c
+void reverse_string(char *str)
+
+```
+
+Membalikkan string, digunakan sebelum decoding karena isi text dienkripsi secara terbalik (reverse).
+
+---
+
+## Fungsi Inti: `handle_client(...)`
+
+Fungsi utama yang memproses koneksi masuk dari client:
+
+### a. `recv()`:
+
+```c
+int received = recv(client_sock, buffer, sizeof(buffer), 0);
+
+```
+
+Menerima pesan dari client, disimpan ke `buffer`.
+
+---
+
+### b. `DECRYPT`:
+
+```c
+if (strncmp(buffer, "DECRYPT", 7) == 0)
+
+```
+
+- Client mengirim data hex terenkripsi
+- Server log `DECRYPT`
+- Proses:
+    1. Reverse string
+    2. Decode hex → byte[]
+    3. Simpan ke `server/database/<timestamp>.jpeg`
+    4. Kirim nama file kembali ke client
+
+---
+
+### c. `DOWNLOAD`:
+
+```c
+else if (strncmp(buffer, "DOWNLOAD", 8) == 0)
+
+```
+
+- Client meminta file JPEG dari server
+- Server:
+    1. Log `DOWNLOAD`
+    2. Baca file → kirim datanya ke client
+    3. Log `UPLOAD`
+
+Jika file tidak ditemukan:
+
+- Kirim pesan error
+- Log `ERROR`
+
+---
+
+### d. `EXIT`:
+
+```c
+else if (strncmp(buffer, "EXIT", 4) == 0)
+
+```
+
+- Client keluar dari aplikasi
+- Log `EXIT`
+- Kirim pesan konfirmasi ke client
+
+---
+
+### e. Default: perintah tidak dikenali
+
+```c
+else {
+    log_message("Server", "ERROR", "Perintah tidak dikenali");
+}
+
+```
+
+---
+
+## Fungsi: `main()`
+
+```c
+pid_t pid = fork();
+if (pid < 0) exit(EXIT_FAILURE);
+if (pid > 0) exit(EXIT_SUCCESS);
+
+```
+
+Membuat proses menjadi **daemon** (background):
+
+- Fork 2x → detach dari terminal
+- `setsid()` → sesi baru
+- `umask(0)` → atur permission
+- `chdir()` → pindah ke direktori kerja
+
+---
+
+### Socket Setup:
+
+```c
+int server_sock = socket(...);
+bind(...);
+listen(...);
+
+```
+
+Membuka socket TCP dan mulai listening di `PORT 8080`.
+
+---
+
+### Loop menerima koneksi:
+
+```c
+while (1) {
+    int client_sock = accept(...);
+    if (fork() == 0) {
+        handle_client(client_sock);
+        exit(0);
+    }
+    close(client_sock);
+}
+
+```
+
+Untuk setiap client:
+
+- **Fork child process** baru
+- Jalankan `handle_client()`
+- Tutup socket di parent
+
+---
+
+Berikut adalah **penjelasan lengkap per bagian dan fungsi dari file `image_client.c`**, sesuai permintaan kamu. File ini merupakan bagian **client-side** dari sistem RPC dan bertanggung jawab untuk menghubungi server, mengirim file untuk didekripsi, dan meminta file hasil decode dari server.
+
+---
+
+## HEADERS dan DEFINISI KONSTANTA
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <arpa/inet.h>
+#include <time.h>
+
+```
+
+Mengimpor fungsi standar, termasuk:
+
+- `socket`, `connect`, `recv`, `send`
+- `fopen`, `fread`, `fwrite`
+- `inet_pton` untuk menghubungkan ke IP server
+
+```c
+#define PORT 8080
+#define SERVER_IP "127.0.0.1"
+#define MAX_BUF 65536
+
+```
+
+ Mendefinisikan:
+
+- Port socket
+- IP lokal server
+- Buffer maksimal untuk file
+
+---
+
+## Fungsi `menu()`
+
+```c
+void menu() {
+    printf("\n===== MENU =====\n");
+    printf("1. Kirim dan decrypt file txt\n");
+    printf("2. Download file jpeg dari server\n");
+    printf("3. Exit\n");
+    printf("Masukkan pilihan Anda: ");
+}
+
+```
+
+Menampilkan opsi menu utama untuk user. Ini akan dipanggil setiap iterasi `while` di `main()`.
+
+---
+
+## Fungsi `connect_and_send(...)`
+
+```c
+void connect_and_send(const char *message, size_t message_len, const char *save_path, int expect_file)
+
+```
+
+### Tugas fungsi ini:
+
+- Membuka koneksi socket ke server
+- Mengirimkan pesan
+- Jika `expect_file == 1` → berarti akan menerima file dan simpan ke `save_path`
+- Jika `expect_file == 0` → hanya tunggu balasan teks (filename/error)
+
+### Langkah-langkah:
+
+1. **Buat socket** TCP dan hubungkan ke server
+2. **Kirim message** (DECRYPT/EXIT/DOWNLOAD ...)
+3. Jika `expect_file`:
+    - Terima data secara bertahap dengan `recv`
+    - Simpan ke file lokal `save_path`
+4. Jika bukan file:
+    - Terima balasan teks dari server (misal: nama file `.jpeg`)
+5. Tutup socket
+
+---
+
+## Fungsi `main()`
+
+```c
+int main() {
+    while (1) {
+        menu();
+        ...
+    }
+}
+
+```
+
+Loop utama program untuk menjalankan CLI interaktif.
+
+---
+
+## Opsi 1: Kirim file untuk DECRYPT
+
+```c
+char fname[128];
+printf("Masukkan nama file txt (di folder client/secrets/): ");
+scanf("%s", fname);
+...
+FILE *f = fopen(path, "r");
+
+```
+
+1. Minta user memasukkan nama file `.txt` dari folder `client/secrets/`
+2. File dibuka dan dibaca
+3. Isi file dianggap string **hex terenkripsi terbalik**
+4. Dibungkus ke pesan `"DECRYPT <hex>"` lalu dikirim ke server
+
+```c
+sprintf(message, "DECRYPT %s", hex);
+connect_and_send(message, strlen(message), NULL, 0);
+
+```
+
+Server akan reverse + decode hex, lalu simpan `.jpeg`, dan mengirimkan nama file balasan.
+
+---
+
+## Opsi 2: Download file JPEG dari server
+
+```c
+char fname[128];
+printf("Masukkan nama file jpeg: ");
+scanf("%s", fname);
+
+```
+
+1. Minta nama file `.jpeg`
+2. Buat pesan `"DOWNLOAD <nama_file>"`
+3. Kirim ke server
+4. Simpan file hasil ke `client/<nama_file>`
+
+---
+
+## Opsi 3: Exit
+
+```c
+char *exit_message = "EXIT";
+connect_and_send(exit_message, strlen(exit_message), NULL, 0);
+
+```
+
+ Kirim sinyal ke server untuk logout, lalu keluar dari program.
+
+---
+
+## Error Handling
+
+- Jika file tidak ditemukan: tampilkan `"Gagal membuka file."`
+- Jika server tidak responsif: akan keluar pesan dari `perror(...)`
+- Jika `recv()` gagal → tampil `"Gagal menerima balasan dari server."`
+
+---
+
+## Cara menjalankannya
+
+gcc image_client.c -o client/image_client
+
+./client/image_client
+
+gcc image_server.c -o server/image_server
+
+./server/image_server && ./client/image_client
+
+check yang sedang pakai port 8080 —> sudo lsof -i :8080
 
 ### Soal 4
 **Soal a**  
