@@ -27,14 +27,15 @@ Semoga Allah memudahkan langkah kita semua dalam menuntut ilmu, mengamalkannya, 
 **Soal a**  
 
 **File:** `system.c` `hunter.c` 
+
 **Kode:**  
-```c
+```system.c
 key_t key = ftok(KEY_PATH, PROJ_ID);
 shmid = shmget(key, sizeof(SharedData), IPC_CREAT | 0666);
 data = (SharedData *)shmat(shmid, NULL, 0);
 memset(data, 0, sizeof(SharedData));
 ```
-```c
+```hunter.c
 key_t key = ftok(KEY_PATH, PROJ_ID);
 shmid = shmget(key, sizeof(SharedData), 0666);
 if (shmid < 0) {
@@ -45,7 +46,7 @@ data = (SharedData *)shmat(shmid, NULL, 0);
 ```
     
 **Penjelasan:**  
-Kode di atas menginisialisasi shared memory menggunakan `shmget` dan `shmat`, yang menjadi inti dari `system.c` untuk mengelola data hunter dan dungeon. Ini sesuai dengan soal a yang menyebutkan `system.c` sebagai pengelola shared memory utama.
+Kode di atas menginisialisasi shared memory menggunakan `shmget` dan `shmat`, yang menjadi inti dari `system.c` untuk mengelola data hunter dan dungeon. Ini sesuai dengan soal a yang menyebutkan `system.c` sebagai pengelola shared memory utama. Library yang digunakan yakni <sys/ipc.h> dan <sys/shm.h>
 
 ---
 
