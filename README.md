@@ -1268,6 +1268,334 @@ gcc -o dispatcher dispatcher.c
 ./dispatcher -status Novi
 ./dispatcher -list
 
+### Soal 3
+**The Lost Dungeon** adalah permainan berbasis terminal client-server yang dibuat dengan socket dan multi-threading. Program ini terdiri dari tiga komponen utama: `dungeon.c` (server), `player.c` (client), dan `shop.c/.h` (modul senjata).
+
+---
+
+## Penjelasan File `dungeon.c` (Server Utama)
+
+File `dungeon.c` adalah komponen utama server dungeon yang menangani:
+
+- Koneksi banyak client melalui socket dan thread (`pthread`)
+- Menu interaktif pemain
+- Sistem pertarungan (battle)
+- Integrasi dengan modul toko senjata (`shop.c` dan `shop.h`)
+
+### 1. Struktur dan Inisialisasi
+
+```c
+typedef struct {
+    int hp;
+    int max_hp;
+    int kills;
+    PlayerStats stats; // dari shop.h
+} FullStats;
+
+typedef struct {
+    int socket_fd;
+    int player_id;
+    FullStats stats;
+    int in_battle;
+    Monster current_enemy;
+    int enemy_hp;
+    char menu[32];
+} Player;
+
+```
+
+- `Player` menyimpan data lengkap client aktif, termasuk socket, status pertempuran, status pemain, dan tampilan menu saat ini.
+
+### 2. Data Musuh (Enemy Pool)
+
+```c
+Monster monsters[3] = {
+    {"Goblin", 50, 80, 5, 10, 30, 70},
+    {"Skeleton Warrior", 80, 120, 10, 15, 50, 100},
+    {"Dark Sorcerer", 120, 200, 15, 20, 100, 200}
+};
+
+```
+
+- Setiap musuh memiliki rentang HP, damage, dan reward emas.
+
+### 3. Menu Utama
+
+```c
+void main_menu(char *response, int player_id) {
+    sprintf(response, "1. Show Player Stats\n2. Shop\n3. Inventory\n4. Battle Mode\n5. Exit\n");
+}
+
+```
+
+- Menu ditampilkan ke client, dan diatur dalam fungsi `handle_command`.
+
+### 4. Status Pemain
+
+```c
+void show_stats(Player *player, char *response);
+
+```
+
+- Menampilkan HP, gold, senjata aktif, damage, passive senjata (jika ada), dan jumlah musuh dikalahkan.
+
+### 5. Battle Mode
+
+```c
+void battle_mode(Player *player, char *response);
+void process_battle(Player *player, char *response);
+
+```
+
+- Pemain akan bertemu musuh secara acak, HP musuh di-random.
+- Damage dihitung dengan sistem **damage roll**:
+
+```c
+int base = player->stats.stats.base_damage + player->stats.stats.equipped_weapon.damage;
+int damage = random_range(base / 2, base + base / 2);
+
+```
+
+- Terdapat 10% peluang **critical hit**: damage dikali dua.
+- Jika senjata memiliki passive, logic passive akan diproses:
+
+```c
+if (strcmp(weapon.name, "Staff of Light") == 0 && chance) enemy_hp = 0; // Insta-kill
+
+```
+
+### 6. Transisi Menu dan Input
+
+```c
+void handle_command(Player *player, char *buffer, char *response);
+
+```
+
+- Fungsi ini menentukan apa yang dilakukan berdasarkan `menu`:
+    - `"main"` → navigasi utama
+    - `"shop"` → beli senjata
+    - `"inventory"` → equip senjata
+    - `"battle"` → perintah attack/run
+
+### 7. Thread per Client
+
+```c
+void *handle_client(void *arg);
+
+```
+
+- Fungsi dijalankan untuk tiap client secara paralel.
+- Mengatur sesi interaktif pemain dari awal hingga keluar.
+
+### 8. Server Main Function
+
+```c
+int main() {
+    socket(), bind(), listen(), accept() → pthread_create()
+}
+
+```
+
+- Server mendengarkan port `8080`, lalu menerima koneksi dan memulai thread untuk tiap pemain.
+
+---
+
+## Penjelasan File `player.c` (Client Terminal)
+
+File `player.c` adalah program client terminal yang terhubung ke server dan mengirimkan input pengguna.
+
+### 1. Setup Socket
+
+```c
+int sock = socket(AF_INET, SOCK_STREAM, 0);
+connect(sock, (struct sockaddr *)&serv_addr, sizeof(serv_addr));
+
+```
+
+- Membuka koneksi TCP ke `localhost` port 8080.
+
+### 2. Main Loop Interaksi
+
+```c
+while (1) {
+    read(sock, buffer, BUFFER_SIZE);
+    printf("%s", buffer);
+    fgets(input, BUFFER_SIZE, stdin);
+    send(sock, input, strlen(input), 0);
+}
+
+```
+
+- Client membaca menu dari server → menampilkan ke layar.
+- Menerima input pengguna → dikirim ke server.
+- Jika server mengirim `"exit"`, client otomatis berhenti.
+
+### 3. Tugas Client
+
+- Tidak menyimpan status apapun.
+- Hanya bertindak sebagai terminal interaktif yang menerima output dan mengirimkan input.
+
+---
+
+## Penjelasan File `shop.c` dan `shop.h` (Modul Toko Senjata)
+
+File `shop.c` dan `shop.h` menangani semua hal terkait senjata: daftar senjata, pembelian, dan inventory pemain.
+
+### 1. Struktur Senjata dan Pemain
+
+```c
+typedef struct {
+    int id;
+    char name[64];
+    int damage;
+    int price;
+    char passive[100];
+    int passive_chance;
+    int passive_effect;
+} Weapon;
+
+typedef struct {
+    Weapon items[MAX_ITEMS];
+    int count;
+} Inventory;
+
+typedef struct {
+    int gold;
+    Inventory inventory;
+    Weapon equipped_weapon;
+    int base_damage;
+} PlayerStats;
+
+```
+
+- Pemain memiliki gold, base damage, dan inventory senjata.
+- Senjata bisa memiliki passive (misalnya: Critical Chance, Insta-Kill).
+
+### 2. Daftar Senjata
+
+```c
+Weapon weapon_shop[WEAPON_COUNT] = {
+    {0, "Wooden Sword", 10, 50, "", 0, 0},
+    {1, "Iron Axe", 20, 150, "", 0, 0},
+    {2, "Steel Dagger", 25, 200, "", 0, 0},
+    {3, "Staff of Light", 15, 120, "10% Insta-Kill", 10, 9999},
+    {4, "Dragon Claws", 30, 300, "30% Critical Hit", 30, 2}
+};
+
+```
+
+- Dua senjata memiliki passive yang diolah di `dungeon.c`.
+
+### 3. Fungsi Utama
+
+### a. weapon_shop_menu
+
+```c
+void weapon_shop_menu(char *response);
+
+```
+
+- Menampilkan daftar senjata beserta harga, damage, dan passive.
+
+### b. buy_weapon
+
+```c
+void buy_weapon(PlayerStats *stats, int weapon_index, char *response);
+
+```
+
+- Memeriksa apakah uang cukup.
+- Menambahkan senjata ke inventory jika berhasil.
+
+### c. show_inventory
+
+```c
+void show_inventory(PlayerStats *stats, char *response);
+
+```
+
+- Menampilkan seluruh senjata yang dimiliki oleh pemain.
+
+### d. equip_weapon
+
+```c
+void equip_weapon(PlayerStats *stats, int item_index, char *response);
+
+```
+
+- Menentukan senjata yang digunakan.
+- Damage akan diperhitungkan dalam battle dari senjata yang sedang dipakai.
+
+---
+
+### Revisi Konsep: Base Damage ≠ Flat Damage
+
+**Sebelumnya**:
+
+```c
+int damage = player->stats.stats.base_damage + player->stats.stats.equipped_weapon.damage;
+
+```
+
+**Revisi dengan sistem damage roll**:
+
+```c
+int base = player->stats.stats.base_damage + player->stats.stats.equipped_weapon.damage;
+int min_dmg = base / 2;
+int max_dmg = base + (base / 2);
+int damage = random_range(min_dmg, max_dmg);
+
+```
+
+### Tambahkan Critical Hit (seperti sebelumnya)
+
+```c
+int is_critical = (rand() % 100) < 10; // 10% chance
+if (is_critical) damage *= 2;
+
+```
+
+### Penempatan Revisi
+
+Revisi ini ditempatkan di fungsi `process_battle` dalam `dungeon.c`.
+
+---
+
+### Penjelasan untuk README.md
+
+> Damage Calculation
+> 
+> 
+> Sistem damage menggunakan *damage roll*, bukan damage statis. Nilai damage akan di-*random* dari range:
+> 
+> Damage∈[Base + Weapon2,3×(Base + Weapon)2]\text{{Damage}} \in \left[\frac{{\text{{Base + Weapon}}}}{2}, \frac{{3 \times (\text{{Base + Weapon}})}}{2}\right]
+> 
+> - Contoh: Base 5 + Weapon 20 = 25 → damage antara 12–37
+> - Terdapat 10% peluang **Critical Hit** (×2 damage)
+> - Jika weapon memiliki passive, akan diproses terpisah berdasarkan chance-nya.
+
+---
+
+### Tambahan ke Kode `dungeon.c` (fungsi `process_battle`)
+
+Ganti bagian:
+
+```c
+int damage = player->stats.stats.base_damage + player->stats.stats.equipped_weapon.damage;
+
+```
+
+Dengan:
+
+```c
+int base = player->stats.stats.base_damage + player->stats.stats.equipped_weapon.damage;
+int min_dmg = base / 2;
+int max_dmg = base + (base / 2);
+int damage = random_range(min_dmg, max_dmg);
+
+```
+
+---
 
 ### Soal 4
 **Soal a**  
