@@ -410,6 +410,865 @@ gcc image_server.c -o server/image_server
 
 check yang sedang pakai port 8080 —> sudo lsof -i :8080
 
+### Soal 2
+## Deskripsi Singkat
+
+RushGo adalah perusahaan ekspedisi fiktif yang memiliki dua jenis pengiriman:
+
+- **Express**: ditangani otomatis oleh 3 agent (`delivery_agent.c`)
+- **Reguler**: ditangani manual oleh user (`dispatcher.c`)
+
+Sistem ini dibangun dengan:
+
+- **Shared Memory** (`shmget`, `shmat`, `shmdt`) untuk berbagi data order
+- **Multithread** (`pthread`) untuk agent Express
+- **Log system** (`delivery.log`) untuk mencatat aktivitas pengiriman
+
+---
+
+### **Download delivery order csv**
+
+```bash
+wget "[Link]" -O delivery_order.csv && code .
+```
+
+## Penjelasan `delivery_agent.c`
+
+`delivery_agent.c` adalah program otomatisasi untuk pengiriman **pesanan bertipe Express**. Program ini:
+
+- Terhubung ke shared memory (berisi semua pesanan)
+- Menjalankan **3 thread agen**: AGENT A, B, dan C
+- Masing-masing agen bertugas mencari pesanan Express yang masih “Pending”
+- Jika menemukan pesanan, agen akan:
+    - Mengubah status menjadi "Delivered"
+    - Menulis catatan ke file `delivery.log`
+    - Menampilkan informasi pengiriman di terminal
+
+### Struktur Data
+
+- `Order`: struktur untuk satu pesanan (nama, alamat, tipe, status)
+- `SharedData`: array dari `Order` yang dibagikan lewat shared memory
+
+Shared memory ini memiliki **key** `1234`, digunakan oleh `dispatcher.c` dan `delivery_agent.c`.
+
+---
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <pthread.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <time.h>
+
+```
+
+Bagian ini mengimpor library standar C yang dibutuhkan:
+
+- `stdio.h`, `stdlib.h`, `string.h` untuk I/O dan string
+- `unistd.h` untuk `sleep()`
+- `pthread.h` untuk membuat thread
+- `sys/ipc.h` dan `sys/shm.h` untuk shared memory
+- `time.h` untuk mencatat waktu pengiriman
+
+---
+
+```c
+#define MAX_ORDERS 100
+#define SHM_KEY 1234
+#define LOG_FILE "delivery.log"
+
+```
+
+Konstanta yang digunakan:
+
+- `MAX_ORDERS`: maksimal jumlah pesanan
+- `SHM_KEY`: kunci shared memory (harus sama dengan dispatcher.c)
+- `LOG_FILE`: nama file log pengiriman
+
+---
+
+```c
+typedef struct {
+    char nama[64];
+    char alamat[128];
+    char tipe[16];
+    char status[64];
+} Order;
+
+typedef struct {
+    Order orders[MAX_ORDERS];
+    int total_orders;
+} SharedData;
+
+```
+
+Struktur data:
+
+- `Order`: mewakili satu pesanan
+- `SharedData`: array `orders` dan total pesanan
+
+---
+
+```c
+SharedData *shared_data;
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+```
+
+Deklarasi variabel global:
+
+- `shared_data`: pointer ke data di shared memory
+- `lock`: mutex untuk menghindari race condition antar thread
+
+---
+
+```c
+void load_csv_to_shared_memory(SharedData *data) {
+
+```
+
+- Fungsi menerima pointer ke `SharedData` yang berada di shared memory.
+- Semua perubahan di `data->orders` akan langsung mengubah isi shared memory.
+
+---
+
+```c
+    FILE *file = fopen("delivery_order.csv", "r");
+    if (!file) {
+        perror("Gagal membuka delivery_order.csv");
+        exit(EXIT_FAILURE);
+    }
+
+```
+
+- Membuka file `delivery_order.csv` dengan mode `read`.
+- Jika gagal dibuka (misal file tidak ada), program langsung keluar (`exit`) dan mencetak error melalui `perror()`.
+
+---
+
+```c
+    char line[256];
+    fgets(line, sizeof(line), file); // skip header
+
+```
+
+- Membaca baris pertama (header `Nama,Alamat,Tipe`) lalu **mengabaikannya**, karena bukan data.
+- Fungsi `fgets` menyimpan satu baris ke dalam buffer `line`.
+
+---
+
+```c
+    int idx = 0;
+    while (fgets(line, sizeof(line), file) && idx < MAX_ORDERS) {
+
+```
+
+- Mulai membaca baris data satu per satu.
+- Loop akan berhenti jika:
+    - Sudah tidak ada baris lagi (EOF)
+    - Jumlah order mencapai batas `MAX_ORDERS`
+
+---
+
+```c
+        char *nama = strtok(line, ",");
+        char *alamat = strtok(NULL, ",");
+        char *tipe = strtok(NULL, "\n");
+
+```
+
+- Menggunakan `strtok` untuk memecah baris CSV berdasarkan koma `,`
+- Hasilnya:
+    - `nama` berisi nama pemesan
+    - `alamat` berisi alamat tujuan
+    - `tipe` berisi "Express" atau "Reguler"
+
+---
+
+```c
+        if (nama && alamat && tipe) {
+
+```
+
+- Cek apakah semua data berhasil diambil. Jika ya, lanjut isi struct.
+
+---
+
+```c
+            strncpy(data->orders[idx].nama, nama, sizeof(data->orders[idx].nama));
+            strncpy(data->orders[idx].alamat, alamat, sizeof(data->orders[idx].alamat));
+            strncpy(data->orders[idx].tipe, tipe, sizeof(data->orders[idx].tipe));
+            strncpy(data->orders[idx].status, "Pending", sizeof(data->orders[idx].status));
+            idx++;
+        }
+
+```
+
+- Mengisi elemen `orders[idx]` dengan informasi dari file:
+    - `nama`, `alamat`, `tipe` → dari CSV
+    - `status` → default `"Pending"` (belum dikirim)
+- `idx++` menambah jumlah order yang berhasil dimasukkan
+
+---
+
+```c
+    data->total_orders = idx;
+    fclose(file);
+}
+
+```
+
+- Setelah semua baris dibaca, `total_orders` diisi dengan jumlah order aktual.
+- File ditutup dengan `fclose()` untuk membebaskan resource.
+
+---
+
+```c
+void save_log(const char *agent, const Order *order) {
+    FILE *log = fopen(LOG_FILE, "a");
+    if (!log) {
+        perror("Gagal membuka delivery.log");
+        return;
+    }
+
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%d/%m/%Y %H:%M:%S", t);
+
+    fprintf(log, "[%s] [AGENT %s] Express package delivered to %s in %s\n",
+            timestamp, agent, order->nama, order->alamat);
+    fflush(log);
+    fclose(log);
+}
+
+```
+
+Fungsi ini digunakan untuk mencatat log pengiriman ke `delivery.log`. Format timestamp menggunakan `strftime`, dan log ditulis dalam format yang telah ditentukan.
+
+---
+
+```c
+int express_orders_done() {
+    for (int i = 0; i < shared_data->total_orders; i++) {
+        if (strcmp(shared_data->orders[i].tipe, "Express") == 0 &&
+            strcmp(shared_data->orders[i].status, "Pending") == 0) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+```
+
+Fungsi ini mengecek apakah masih ada pesanan bertipe `"Express"` yang belum dikirim (`status == Pending`). Jika tidak ada, maka return `1`.
+
+---
+
+```c
+void *agent_thread(void *arg) {
+    char *agent_name = (char *)arg;
+
+```
+
+Setiap thread akan menjalankan fungsi ini. `arg` berisi nama agen: `"A"`, `"B"`, atau `"C"`.
+
+---
+
+```c
+    while (1) {
+        pthread_mutex_lock(&lock);
+        int found = 0;
+
+        for (int i = 0; i < shared_data->total_orders; i++) {
+            if (strcmp(shared_data->orders[i].tipe, "Express") == 0 &&
+                strcmp(shared_data->orders[i].status, "Pending") == 0) {
+
+```
+
+Loop mencari order Express yang belum dikirim (`status == Pending`). Mutex digunakan agar thread tidak konflik saat mengakses `shared_data`.
+
+---
+
+```c
+                char status[64];
+                snprintf(status, sizeof(status), "Delivered by %s", agent_name);
+                strncpy(shared_data->orders[i].status, status, sizeof(shared_data->orders[i].status));
+
+                save_log(agent_name, &shared_data->orders[i]);
+                printf("[AGENT %s] Delivered Express package to %s in %s\n", agent_name, shared_data->orders[i].nama, shared_data->orders[i].alamat);
+                fflush(stdout);
+                found = 1;
+                break;
+            }
+        }
+
+        pthread_mutex_unlock(&lock);
+
+        if (!found && express_orders_done()) break;
+        sleep(1);
+    }
+
+    return NULL;
+}
+
+```
+
+Jika ada pesanan ditemukan:
+
+- Status diperbarui
+- Log ditulis
+- Informasi dicetak ke terminal
+
+Jika tidak ditemukan dan semua Express sudah terkirim, thread keluar dari loop.
+
+---
+
+```c
+int main() {
+    int shmid = shmget(SHM_KEY, sizeof(SharedData), IPC_CREAT | 0666);
+    if (shmid == -1) {
+        perror("shmget gagal");
+        exit(EXIT_FAILURE);
+    }
+
+    shared_data = (SharedData *)shmat(shmid, NULL, 0);
+    if (shared_data == (void *)-1) {
+        perror("shmat gagal");
+        exit(EXIT_FAILURE);
+    }
+
+```
+
+Program utama:
+
+- Membuat atau mengambil shared memory
+- `shmat` menghubungkan memori tersebut ke pointer `shared_data`
+
+---
+
+```c
+    if (shared_data->total_orders == 0) {
+        printf("Tidak ada pesanan dalam shared memory. Harap jalankan dispatcher terlebih dahulu.\n");
+        shmdt(shared_data);
+        return 0;
+    }
+
+```
+
+Kalau belum ada pesanan (`total_orders == 0`), program keluar dan memberi tahu pengguna untuk menjalankan `dispatcher` dulu.
+
+---
+
+```c
+    pthread_t agentA, agentB, agentC;
+    pthread_create(&agentA, NULL, agent_thread, "A");
+    pthread_create(&agentB, NULL, agent_thread, "B");
+    pthread_create(&agentC, NULL, agent_thread, "C");
+
+    pthread_join(agentA, NULL);
+    pthread_join(agentB, NULL);
+    pthread_join(agentC, NULL);
+
+```
+
+Membuat dan menjalankan 3 thread agen. Program akan menunggu ketiganya selesai (`join`).
+
+---
+
+```c
+    shmdt(shared_data);
+    printf("Semua paket Express telah dikirim. Program selesai.\n");
+    return 0;
+}
+
+```
+
+Setelah semua agen selesai, shared memory dilepas dan program ditutup.
+
+---
+
+## Penjelasan Lengkap Kode `dispatcher.c`
+
+---
+
+### 1. Import Library
+
+```c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <time.h>
+#include <unistd.h>
+
+```
+
+> Kode ini mengimpor peralatan yang dibutuhkan:
+> 
+- `stdio.h` untuk baca/tulis data di terminal dan file
+- `stdlib.h` untuk fungsi umum seperti `exit()`
+- `string.h` untuk mengelola teks (nama, alamat, dst.)
+- `sys/ipc.h` dan `sys/shm.h` untuk fitur **shared memory**
+- `time.h` untuk mencatat waktu pengiriman
+- `unistd.h` untuk dapatkan nama user Linux dan fungsi tambahan
+
+---
+
+### 2. Konstanta & Struktur Data
+
+```c
+#define MAX_ORDERS 100
+#define SHM_KEY 1234
+#define LOG_FILE "delivery.log"
+
+```
+
+> Di sini kita tentukan:
+> 
+- Maksimal pesanan yang bisa ditampung: 100
+- Kunci shared memory yang digunakan: 1234
+- Nama file log: "delivery.log"
+
+---
+
+```c
+typedef struct {
+    char nama[64];
+    char alamat[128];
+    char tipe[16];
+    char status[64];
+} Order;
+
+```
+
+> Order adalah struktur/data untuk 1 pesanan:
+> 
+- `nama`: siapa yang dikirimi
+- `alamat`: ke mana dikirim
+- `tipe`: "Express" atau "Reguler"
+- `status`: misalnya "Pending" atau "Delivered by Agent B"
+
+---
+
+```c
+typedef struct {
+    Order orders[MAX_ORDERS];
+    int total_orders;
+} SharedData;
+
+```
+
+> SharedData adalah kumpulan semua pesanan (orders) dan jumlah totalnya.
+> 
+
+---
+
+### 3. Fungsi untuk Memuat CSV
+
+```c
+void load_csv_to_shared_memory(SharedData *data)
+
+```
+
+> Fungsi ini memuat data pesanan dari file delivery_order.csv dan menyimpannya ke memori bersama (shared memory).
+> 
+
+---
+
+```c
+FILE *file = fopen("delivery_order.csv", "r");
+if (!file) {
+    perror("Gagal membuka delivery_order.csv");
+    exit(EXIT_FAILURE);
+}
+
+```
+
+> Kita coba buka file CSV. Kalau file tidak ditemukan, tampilkan pesan error dan keluar dari program.
+> 
+
+---
+
+```c
+char line[256];
+fgets(line, sizeof(line), file); // skip header
+
+```
+
+> Baris pertama file berisi "Nama,Alamat,Tipe", yang tidak kita perlukan, jadi dilewati.
+> 
+
+---
+
+```c
+int idx = 0;
+while (fgets(line, sizeof(line), file) && idx < MAX_ORDERS)
+
+```
+
+> Kita baca baris demi baris, selama belum mencapai batas maksimal (100 order).
+> 
+
+---
+
+```c
+char *nama = strtok(line, ",");
+char *alamat = strtok(NULL, ",");
+char *tipe = strtok(NULL, "\n");
+
+```
+
+> Setiap baris kita pecah berdasarkan koma (,). Kita ambil:
+> 
+- nama penerima
+- alamat tujuan
+- tipe pesanan
+
+---
+
+```c
+if (nama && alamat && tipe)
+
+```
+
+> Kalau semua bagian berhasil terbaca, baru lanjut isi ke struct pesanan.
+> 
+
+---
+
+```c
+strncpy(data->orders[idx].nama, nama, ...);
+strncpy(data->orders[idx].alamat, alamat, ...);
+strncpy(data->orders[idx].tipe, tipe, ...);
+strncpy(data->orders[idx].status, "Pending", ...);
+idx++;
+
+```
+
+> Masukkan semua informasi ke dalam array orders. Status awal = "Pending".
+> 
+
+---
+
+```c
+data->total_orders = idx;
+fclose(file);
+
+```
+
+> Simpan jumlah total pesanan ke shared memory dan tutup file.
+> 
+
+---
+
+### 4. Fungsi Menyimpan ke Log
+
+```c
+void save_log(const char *agent, const Order *order, const char *tipe)
+
+```
+
+> Fungsi ini mencatat pengiriman ke dalam file delivery.log.
+> 
+
+---
+
+```c
+FILE *log = fopen(LOG_FILE, "a");
+if (!log) { perror(...); return; }
+
+```
+
+> Buka file untuk ditambahkan (a = append). Kalau gagal, tampilkan error.
+> 
+
+---
+
+```c
+time_t now = time(NULL);
+struct tm *t = localtime(&now);
+strftime(timestamp, sizeof(timestamp), "%d/%m/%Y %H:%M:%S", t);
+
+```
+
+> Ambil waktu sekarang dan ubah ke format jam/tanggal yang mudah dibaca.
+> 
+
+---
+
+```c
+fprintf(log, "[%s] [AGENT %s] %s package delivered to %s in %s\n", ...);
+fflush(log);
+fclose(log);
+
+```
+
+> Tulis info ke file log dan tutup file-nya.
+> 
+
+---
+
+### 5. Fungsi `main()` (Program Utama)
+
+### Penjelasan `int main(int argc, char *argv[])`
+
+Fungsi `main` adalah pusat dari program `dispatcher.c`. Ia mengatur:
+
+- Penghubung ke shared memory
+- Pengisian data dari CSV jika belum ada
+- Penanganan perintah pengguna (`deliver`, `status`, `list`)
+
+---
+
+### Bagian 1: Mengakses Shared Memory
+
+```c
+int shmid = shmget(SHM_KEY, sizeof(SharedData), IPC_CREAT | 0666);
+
+```
+
+**Penjelasan**:
+
+- `shmget` digunakan untuk **mengakses** atau **membuat** shared memory.
+- `SHM_KEY` (1234) adalah kunci agar semua program (dispatcher & delivery agent) memakai memory yang sama.
+- `sizeof(SharedData)` menentukan ukuran memory yang dialokasikan.
+- `IPC_CREAT | 0666` artinya:
+    - Jika belum ada, maka buat memory baru.
+    - Izin akses diberikan penuh (read & write) ke semua user.
+
+---
+
+```c
+if (shmid == -1) {
+    perror("shmget gagal");
+    exit(EXIT_FAILURE);
+}
+
+```
+
+**Penjelasan**:
+
+- Kalau `shmget` gagal (misalnya karena hak akses atau memori penuh), program langsung keluar dan mencetak pesan kesalahan.
+
+---
+
+### Bagian 2: Menghubungkan ke Shared Memory
+
+```c
+SharedData *shared_data = (SharedData *)shmat(shmid, NULL, 0);
+
+```
+
+**Penjelasan**:
+
+- `shmat` adalah fungsi untuk **menghubungkan shared memory** yang tadi dibuat ke variabel `shared_data`.
+- Setelah ini, `shared_data->orders` bisa diakses seperti array biasa.
+
+---
+
+```c
+if (shared_data == (void *)-1) {
+    perror("shmat gagal");
+    exit(EXIT_FAILURE);
+}
+
+```
+
+**Penjelasan**:
+
+- Kalau gagal menghubungkan, program akan keluar. Ini penting untuk mencegah operasi ke memori yang tidak valid.
+
+---
+
+### Bagian 3: Load dari CSV jika Kosong
+
+```c
+if (shared_data->total_orders == 0) {
+    printf("Shared memory kosong. Memuat dari CSV...\n");
+    load_csv_to_shared_memory(shared_data);
+}
+
+```
+
+**Penjelasan**:
+
+- Jika jumlah pesanan masih 0, artinya belum pernah diisi.
+- Maka kita muat data dari file `delivery_order.csv` ke dalam shared memory dengan memanggil fungsi `load_csv_to_shared_memory`.
+
+---
+
+### Bagian 4: Menangani Argumen dari Terminal
+
+```c
+if (argc >= 2) {
+
+```
+
+**Penjelasan**:
+
+- Mengecek apakah ada **perintah** yang diberikan oleh pengguna.
+- `argc` menyimpan jumlah argumen, dan `argv` adalah array dari string perintah, misalnya:
+    - `argv[0] = "./dispatcher"`
+    - `argv[1] = "-deliver"`
+    - `argv[2] = "Novi"`
+
+---
+
+### Sub-perintah 1: `deliver [Nama]`
+
+```c
+if (strcmp(argv[1], "-deliver") == 0 && argc == 3)
+
+```
+
+**Penjelasan**:
+
+- Mengecek apakah perintah adalah `deliver` dan ada nama penerima.
+
+---
+
+```c
+for (int i = 0; i < shared_data->total_orders; i++) {
+    if (strcmp(shared_data->orders[i].nama, target) == 0 &&
+        strcmp(shared_data->orders[i].tipe, "Reguler") == 0 &&
+        strcmp(shared_data->orders[i].status, "Pending") == 0) {
+
+```
+
+**Penjelasan**:
+
+- Mencari pesanan dengan nama yang sama, bertipe `Reguler`, dan statusnya masih `Pending`.
+- Jika ditemukan:
+
+```c
+char *agent = getenv("USER");
+if (agent == NULL) agent = "UNKNOWN";
+
+```
+
+- Ambil nama user Linux (sebagai pengantar).
+
+```c
+snprintf(status, sizeof(status), "Delivered by Agent %s", agent);
+strncpy(shared_data->orders[i].status, status, sizeof(shared_data->orders[i].status));
+save_log(agent, &shared_data->orders[i], "Reguler");
+
+```
+
+- Update status di shared memory
+- Simpan ke log
+
+---
+
+### Sub-perintah 2: `status [Nama]`
+
+```c
+else if (strcmp(argv[1], "-status") == 0 && argc == 3)
+
+```
+
+**Penjelasan**:
+
+- Perintah untuk **melihat status pengiriman** dari seseorang.
+
+```c
+if (strcmp(shared_data->orders[i].nama, target) == 0)
+
+```
+
+- Jika ditemukan, tampilkan:
+
+```c
+printf("Status for %s: %s\n", target, shared_data->orders[i].status);
+
+```
+
+---
+
+### Sub-perintah 3: `list`
+
+```c
+else if (strcmp(argv[1], "-list") == 0)
+
+```
+
+**Penjelasan**:
+
+- Menampilkan semua pesanan dalam shared memory, termasuk:
+    - Nama penerima
+    - Alamat
+    - Tipe
+    - Status
+
+---
+
+### Penanganan Perintah Tidak Dikenali
+
+```c
+else {
+    printf("Perintah tidak dikenali.\n");
+}
+
+```
+
+- Jika perintah tidak cocok dengan `deliver`, `status`, atau `list`, maka ditolak.
+
+---
+
+### Jika Tidak Ada Argumen
+
+```c
+} else {
+    printf("Penggunaan:\n");
+    printf("./dispatcher -deliver [Nama]\n");
+    printf("./dispatcher -status [Nama]\n");
+    printf("./dispatcher -list\n");
+}
+
+```
+
+- Kalau pengguna tidak mengetikkan perintah apa pun, program akan mencetak panduan penggunaan.
+
+---
+
+### Terakhir: Lepaskan Memory
+
+```c
+shmdt(shared_data);
+return 0;
+
+```
+
+- `shmdt` digunakan untuk **memutus koneksi dari shared memory**.
+- Program selesai.
+
+---
+
+Kalau kamu mau, aku bisa gabungkan semua penjelasan ini jadi satu file Markdown atau Word untuk dokumentasi. Perlu?
+
+### Cara menjalankannya
+
+ipcs -m (check shared memory)
+
+ipcrm -M 1234 (Reset Shared Memory)
+rm delivery.log
+./delivery_agent
+
+gcc -o delivery_agent delivery_agent.c -lpthread
+
+./delivery_agent
+
+gcc -o dispatcher dispatcher.c
+./dispatcher -deliver Novi
+./dispatcher -status Novi
+./dispatcher -list
+
+
 ### Soal 4
 **Soal a**  
 
